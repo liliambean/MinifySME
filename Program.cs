@@ -16,27 +16,26 @@ foreach (var player in players)
 void OptimizePlayerMappings(string player) {
     var targetMapPath = $"{spriteFolderPath}\\{player}\\Map - {player}.asm";
     var targetPLCPath = $"{spriteFolderPath}\\{player}\\DPLC - {player}.asm";
-    var sourceMap = ParseFile($"{spriteFolderPath}\\{player}\\map.asm", 13);
-    var sourcePLC = ParseFile($"{spriteFolderPath}\\{player}\\plc.asm", 5);
-    var targetMap = ParseFile(targetMapPath, 13);
-    var targetPLC = ParseFile(targetPLCPath, 5);
+    var sourceMap = Parse($"{spriteFolderPath}\\{player}\\map.asm", 3);
+    var sourcePLC = Parse($"{spriteFolderPath}\\{player}\\plc.asm", 1);
+    var targetMap = Parse(targetMapPath, 3);
+    var targetPLC = Parse(targetPLCPath, 1);
 
-    WriteFile(sourceMap, targetMap, targetMapPath, true);
-    WriteFile(sourcePLC, targetPLC, targetPLCPath, false);
+    Write(sourceMap, targetMap, targetMapPath, true);
+    Write(sourcePLC, targetPLC, targetPLCPath, false);
 }
 
-void WriteFile(ParseResult source, ParseResult target, string path, bool byteMode)
+void Write(ParseResult source, ParseResult target, string path, bool byteMode)
 {
-    var sourceDefinitions = SortDefinitions(source);
-    var targetDefinitions = SortDefinitions(target);
+    var definitions = SortDefinitions(source);
 }
 
-ParseResult ParseFile(string path, int bufferSize)
+ParseResult Parse(string path, int entrySize)
 {
+    var mainTable = default(IList<string>);
     var offsetTables = new Dictionary<string, IList<string>>();
-    var definitions = new Dictionary<short[], IList<string>>(new DefinitionComparer());
-    var buffer = new List<short>(bufferSize);
-    var label = string.Empty;
+    var definitions = new Dictionary<IList<short>, HashSet<string>>(new DefinitionComparer());
+    var labels = new HashSet<string>();
     var tableMode = true;
 
     using var reader = File.OpenText(path);
@@ -54,30 +53,20 @@ ParseResult ParseFile(string path, int bufferSize)
 
         if (line.Length == read.Length)
         {
-            var definition = buffer.ToArray();
-            buffer = new List<short>(bufferSize);
+            var tokens = line.Split(':', 2);
+            var label = tokens[0];
 
-            if (definitions.TryGetValue(definition, out var labels))
-            {
-                if (labels.Contains(label))
-                    throw new InvalidDataException(label);
-
-                labels.Add(label);
-            }
-            else if (offsetTables.Values.Any(table => table.Contains(label)))
-            {
-                definitions.Add(definition, new List<string> { label });
-            }
-
-            var split = line.Split(':', 2);
-            // TODO: handle multiple labels in a row
-            label = split[0];
-            line = split[1].TrimStart();
+            if (definitions.Values.Any(existingLabels => existingLabels.Contains(label)))
+                throw new InvalidDataException();
 
             if (tableMode && offsetTables.Values.Any(table => table.Contains(label)))
             {
                 tableMode = false;
+                labels.Clear();
             }
+
+            labels.Add(label);
+            line = tokens[1].TrimStart();
 
             if (string.IsNullOrWhiteSpace(line))
                 continue;
@@ -86,104 +75,141 @@ ParseResult ParseFile(string path, int bufferSize)
         if (line == "even")
             break;
 
-        var tokens = line.Split(null, 2);
-        var byteMode = tokens[0] switch
-        {
-            "dc.b" => true,
-            "dc.w" => false,
-            _ => throw new InvalidDataException(label)
-        };
-
         if (tableMode)
         {
-            if (byteMode)
-                throw new InvalidDataException(label);
+            var tokens = line.Split(null, 2);
+            if (GetOperandSize(tokens[0])) throw new InvalidDataException();
 
             tokens = tokens[1].Split('-', 2);
-            var value = tokens[0];
-            var tableName = tokens[1];
+            var (label, tableName) = (tokens[0], tokens[1]);
 
-            if (offsetTables.TryGetValue(tableName, out var table))
+            if (!offsetTables.TryGetValue(tableName, out var table))
             {
-                if (table.Contains(value))
-                {
-                    var mainTable = offsetTables.First().Value;
-
-                    if (table == mainTable || value != mainTable.First())
-                        throw new InvalidDataException(value);
-                }
-
-                table.Add(value);
+                table = new List<string> { label };
+                offsetTables.Add(tableName, table);
+                mainTable ??= table;
             }
+            else if (table != mainTable && label != mainTable!.First() && table.Contains(label))
+                throw new InvalidDataException();
             else
-            {
-                offsetTables.Add(tableName, new List<string> { value });
-            }
+                table.Add(label);
         }
         else
         {
-            var values = tokens[1].Split(',', StringSplitOptions.TrimEntries)
-                .AsEnumerable().GetEnumerator();
+            (var operands, var operandSize) = GetOperandEnumerator(line);
+            (operands, operandSize, var definition) = GetWords(reader, operands, operandSize, 1);
+            var numWords = definition[0] * entrySize;
 
-            while (values.MoveNext())
+            if (numWords != 0)
+                definition.AddRange(GetWords(reader, operands, operandSize, numWords).Words);
+
+            if (!definitions.TryGetValue(definition, out var existingLabels))
             {
-                if (byteMode)
-                {
-                    var high = (short)(ParseValue(values.Current) << 8);
-                    if (!values.MoveNext())
-                        throw new InvalidDataException(label);
-
-                    buffer.Add((short)(ParseValue(values.Current) | high));
-                }
-                else
-                {
-                    buffer.Add(ParseValue(values.Current));
-                }
+                definitions.Add(definition, labels);
+                labels = new HashSet<string>();
             }
-
+            else
+            {
+                foreach (var label in labels) existingLabels.Add(label);
+                labels.Clear();
+            }
         }
+
     }
 
     return new ParseResult(offsetTables, definitions);
 }
 
-short ParseValue(string value) {
-    return !value.StartsWith('$') ? short.Parse(value)
-        : short.Parse(value[1..], System.Globalization.NumberStyles.AllowHexSpecifier);
+(IEnumerator<string>, bool, List<short> Words) GetWords(StreamReader reader, IEnumerator<string> operands, bool operandSizeIsByte, int count)
+{
+    var words = new List<short>(count);
+    var bytes = new List<byte>(2);
+
+    while (true)
+    {
+        if (operandSizeIsByte)
+        {
+            while (operands.MoveNext())
+            {
+                bytes.Add((byte)GetOperandValue(operands.Current));
+                if (bytes.Count == 2)
+                {
+                    words.Add((short)(bytes[0] << 8 | bytes[1]));
+                    if (words.Count == count) return (operands, operandSizeIsByte, words);
+                    bytes.Clear();
+                }
+            }
+        }
+        else
+        {
+            if (bytes.Count != 0) throw new InvalidDataException();
+
+            while (operands.MoveNext())
+            {
+                words.Add((short)GetOperandValue(operands.Current));
+                if (words.Count == count) return (operands, operandSizeIsByte, words);
+            }
+        }
+
+        var line = reader.ReadLine() ?? throw new InvalidDataException();
+        (operands, operandSizeIsByte) = GetOperandEnumerator(line.TrimStart());
+    }
 }
 
-IList<KeyValuePair<short[], IList<string>>> SortDefinitions(ParseResult result) => result
+(IEnumerator<string>, bool) GetOperandEnumerator(string line)
+{
+    var tokens = line.Split(null, 2);
+    var operandSizeIsByte = GetOperandSize(tokens[0]);
+    var operands = tokens[1]
+        .Split(',', StringSplitOptions.TrimEntries).AsEnumerable().GetEnumerator();
+
+    return (operands, operandSizeIsByte);
+}
+
+bool GetOperandSize(string token) => token switch
+{
+    "dc.b" => true,
+    "dc.w" => false,
+    _ => throw new InvalidDataException(token)
+};
+
+int GetOperandValue(string value) {
+    return !value.StartsWith('$') ? int.Parse(value) : 
+        int.Parse(value[1..], System.Globalization.NumberStyles.AllowHexSpecifier);
+}
+
+IList<KeyValuePair<IList<short>, HashSet<string>>> SortDefinitions(ParseResult result) => result
     .Definitions.OrderBy(definition => definition.Value, new TableEntryComparer(result)).ToList();
 
 record ParseResult(
     IReadOnlyDictionary<string, IList<string>> OffsetTables,
-    IReadOnlyDictionary<short[], IList<string>> Definitions
+    IReadOnlyDictionary<IList<short>, HashSet<string>> Definitions
 );
 
-class TableEntryComparer : IComparer<IList<string>>
+class TableEntryComparer : IComparer<HashSet<string>>
 {
     public TableEntryComparer(ParseResult result)
     {
 
     }
 
-    public int Compare(IList<string>? a, IList<string>? b)
+    public int Compare(HashSet<string>? a, HashSet<string>? b)
     {
-        throw new NotImplementedException();
+        return 0;
     }
 }
 
-class DefinitionComparer : IEqualityComparer<short[]>
+class DefinitionComparer : IEqualityComparer<IList<short>>
 {
-    public bool Equals(short[]? a, short[]? b)
+    public bool Equals(IList<short>? a, IList<short>? b)
     {
         if (ReferenceEquals(a, b))
             return true;
 
-        if (a!.Length != b!.Length)
+        if (a!.Count != b!.Count)
             return false;
 
-        for (var index = 0; index < a.Length; index++)
+        for (var index = 0; index < a.Count; index++)
         {
             if (a[index] != b[index])
                 return false;
@@ -192,7 +218,7 @@ class DefinitionComparer : IEqualityComparer<short[]>
         return true;
     }
 
-    public int GetHashCode(short[] words)
+    public int GetHashCode(IList<short> words)
     {
         if (words is null)
             return 0;
