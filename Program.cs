@@ -1,5 +1,6 @@
 ﻿namespace SpriteMapOptimizer
 {
+    using System.Collections.Immutable;
     using System.Text;
 
     class Program
@@ -16,50 +17,56 @@
         {
             foreach (var player in players)
             {
-                OptimizePlayerMappings(player);
+                var targetMapPath = $"{spriteFolderPath}\\{player}\\Map - {player}.asm";
+                var targetPLCPath = $"{spriteFolderPath}\\{player}\\DPLC - {player}.asm";
+
+                var sourceMap = Parse($"{spriteFolderPath}\\{player}\\map.asm", 3);
+                var sourcePLC = Parse($"{spriteFolderPath}\\{player}\\plc.asm", 1);
+                var targetMap = Parse(targetMapPath, 3);
+                var targetPLC = Parse(targetPLCPath, 1);
+
+                var map = Serialize(sourceMap, targetMap, true);
+                var plc = Serialize(sourcePLC, targetPLC, false);
+                File.WriteAllText(targetMapPath, map);
+                File.WriteAllText(targetPLCPath, plc);
             }
         }
 
-        static void OptimizePlayerMappings(string player)
-        {
-            var targetMapPath = $"{spriteFolderPath}\\{player}\\Map - {player}.asm";
-            var targetPLCPath = $"{spriteFolderPath}\\{player}\\DPLC - {player}.asm";
-            var sourceMap = Parse($"{spriteFolderPath}\\{player}\\map.asm", 3);
-            var sourcePLC = Parse($"{spriteFolderPath}\\{player}\\plc.asm", 1);
-            var targetMap = Parse(targetMapPath, 3);
-            var targetPLC = Parse(targetPLCPath, 1);
-
-            var map = Serialize(sourceMap, targetMap, targetMapPath, true);
-            var plc = Serialize(sourcePLC, targetPLC, targetPLCPath, false);
-        }
-
-        static string Serialize(ParseResult source, ParseResult target, string path, bool byteMode)
+        static string Serialize(ParseResult source, ParseResult target, bool byteMode)
         {
             var builder = new StringBuilder();
-
-            var offsetTables = target.OffsetTables.GetEnumerator();
-            offsetTables.MoveNext();
-            var (tableName, table) = offsetTables.Current;
-
-            while (true)
-            {
-                foreach (var label in table)
-                    builder.AppendLine($"\t\tdc.w {label}-{tableName}");
-
-                if (!offsetTables.MoveNext())
-                    break;
-
-                (tableName, table) = offsetTables.Current;
-                builder.AppendLine($"{tableName}:");
-            }
-
             var definitions = SortDefinitions(source);
-            var labels = target.OffsetTables.Values.SelectMany(label => label).ToList();
+
+            var offsetTable = target.OffsetTable
+                .GroupBy(entry => entry.TableName)
+                .ToDictionary(group => group.Key, group => group.ToList())
+                .SelectMany(group => group.Value, (_, entry) => (entry.Label, entry.TableName))
+                .GetEnumerator();
+
+            offsetTable.MoveNext();
+            var prevTable = offsetTable.Current.TableName;
+
+            do
+            {
+                var (label, tableName) = offsetTable.Current;
+
+                if (prevTable != tableName)
+                {
+                    prevTable = tableName;
+                    builder.AppendLine($"{tableName}:");
+                }
+
+                builder.AppendLine($"\t\tdc.w {label}-{tableName}");
+
+            } while (offsetTable.MoveNext());
 
             foreach (var (definition, indices) in definitions)
             {
-                foreach (var index in indices)
-                    builder.AppendLine($"{labels[index]}:");
+                var labels = indices.Select(index => target.OffsetTable[index].Label)
+                    .ToImmutableSortedSet();
+
+                foreach (var label in labels)
+                    builder.AppendLine($"{label}:");
 
                 builder.AppendLine($"\t\tdc.w {SerializeOperandValue(definition.First())}");
 
@@ -76,11 +83,10 @@
                 else
                 {
                     foreach (var value in definition.Skip(1))
-                        builder.AppendLine($"\t\tdc.w  {SerializeOperandValue(value)}");
+                        builder.AppendLine($"\t\tdc.w {SerializeOperandValue(value)}");
                 }
             }
 
-            builder.AppendLine();
             return builder.ToString();
         }
 
@@ -88,8 +94,8 @@
         {
             var labels = new HashSet<string>();
             var definitions = new Dictionary<IList<short>, HashSet<string>>(new DefinitionComparer());
-            var offsetTables = new Dictionary<string, IList<string>>();
-            var mainTable = default(IList<string>);
+            var offsetTable = new List<(string Label, string TableName)>();
+            var mainTable = default(string);
             var tableMode = true;
 
             using var reader = File.OpenText(path);
@@ -113,7 +119,7 @@
                     if (definitions.Values.Any(existingLabels => existingLabels.Contains(label)))
                         throw new InvalidDataException();
 
-                    if (tableMode && offsetTables.Values.Any(table => table.Contains(label)))
+                    if (tableMode && offsetTable.Any(entry => entry.Label == label))
                     {
                         tableMode = false;
                         labels.Clear();
@@ -134,24 +140,24 @@
                 if (tableMode)
                 {
                     if (operandSize) throw new InvalidDataException();
-                    while (true)
+
+                    while (operands.MoveNext())
                     {
-                        if (!operands.MoveNext())
-                            break;
-
                         var tokens = operands.Current.Split('-', 2);
-                        var (label, tableName) = (tokens[0], tokens[1]);
+                        var entry = (tokens[0], tokens[1]);
+                        var (label, tableName) = entry;
 
-                        if (!offsetTables.TryGetValue(tableName, out var table))
+                        if (mainTable is null)
                         {
-                            table = new List<string> { label };
-                            offsetTables.Add(tableName, table);
-                            mainTable ??= table;
+                            mainTable = tableName;
                         }
-                        else if (table != mainTable && label != mainTable!.First() && table.Contains(label))
+                        else if ((tableName == mainTable || label != offsetTable.First().Label) &&
+                            offsetTable.Any(entry => entry.Label == label && entry.TableName == tableName))
+                        {
                             throw new InvalidDataException();
-                        else
-                            table.Add(label);
+                        }
+
+                        offsetTable.Add(entry);
                     }
                 }
                 else
@@ -176,7 +182,7 @@
 
             }
 
-            return new ParseResult(offsetTables, definitions);
+            return new ParseResult(offsetTable, definitions);
         }
 
         static string StripComments(string line)
@@ -265,7 +271,7 @@
 
         static IList<(IList<short>, IList<int>)> SortDefinitions(ParseResult result)
         {
-            var labels = result.OffsetTables.Values.SelectMany(labels => labels).ToList();
+            var labels = result.OffsetTable.Select(entry => entry.Label).ToList();
 
             return result.Definitions
                 .Select(definition => (definition.Key, definition.Value
@@ -315,7 +321,7 @@
     }
 
     record ParseResult(
-        IReadOnlyDictionary<string, IList<string>> OffsetTables,
+        IList<(string Label, string TableName)> OffsetTable,
         IReadOnlyDictionary<IList<short>, HashSet<string>> Definitions
     );
 }
