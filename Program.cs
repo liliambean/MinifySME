@@ -1,4 +1,4 @@
-﻿namespace SpriteMapOptimizer
+﻿namespace MinifySME
 {
     using System.Collections.Immutable;
     using System.Text;
