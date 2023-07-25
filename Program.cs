@@ -5,65 +5,72 @@
 
     class Program
     {
-        static readonly string spriteFolderPath = @"C:\Users\Fred\Documents\Git\s3unlocked\General\Sprites";
-        static readonly string[] players = new[]
-        {
-            "Sonic",
-            "Tails",
-            "Knuckles",
-        };
-
         static void Main()
         {
-            foreach (var player in players)
+            var spriteFolderPath = @"C:\Users\Fred\Documents\Git\s3unlocked\General\Sprites";
+            var players = new[]
             {
+                ("Sonic", true),
+                ("Tails", false),
+                ("Knuckles", false),
+            };
+
+            foreach (var (player, interleaved) in players)
+            {
+                var sourceMapPath = $"{spriteFolderPath}\\{player}\\map.asm";
                 var targetMapPath = $"{spriteFolderPath}\\{player}\\Map - {player}.asm";
+
+                if (File.Exists(sourceMapPath))
+                {
+                    var source = Parse(sourceMapPath, 3);
+                    var target = Parse(targetMapPath, 3);
+                    var text = Serialize(source, target, interleaved, true);
+                    File.WriteAllText(targetMapPath, text);
+                }
+
+                var sourcePLCPath = $"{spriteFolderPath}\\{player}\\plc.asm";
                 var targetPLCPath = $"{spriteFolderPath}\\{player}\\DPLC - {player}.asm";
 
-                var sourceMap = Parse($"{spriteFolderPath}\\{player}\\map.asm", 3);
-                var sourcePLC = Parse($"{spriteFolderPath}\\{player}\\plc.asm", 1);
-                var targetMap = Parse(targetMapPath, 3);
-                var targetPLC = Parse(targetPLCPath, 1);
-
-                var map = Serialize(sourceMap, targetMap, true);
-                var plc = Serialize(sourcePLC, targetPLC, false);
-                File.WriteAllText(targetMapPath, map);
-                File.WriteAllText(targetPLCPath, plc);
+                if (File.Exists(sourcePLCPath))
+                {
+                    var source = Parse(sourcePLCPath, 1);
+                    var target = Parse(targetPLCPath, 1);
+                    var text = Serialize(source, target, interleaved, false);
+                    File.WriteAllText(targetPLCPath, text);
+                }
             }
         }
 
-        static string Serialize(ParseResult source, ParseResult target, bool byteMode)
+        static string Serialize(ParseResult source, ParseResult target, bool interleaved, bool byteMode)
         {
             var builder = new StringBuilder();
-            var definitions = SortDefinitions(source);
+            var tables = new List<string> { target.OffsetTable.First().TableName };
 
-            var offsetTable = target.OffsetTable
-                .GroupBy(entry => entry.TableName)
-                .ToDictionary(group => group.Key, group => group.ToList())
-                .SelectMany(group => group.Value, (_, entry) => (entry.Label, entry.TableName))
-                .GetEnumerator();
-
-            offsetTable.MoveNext();
-            var prevTable = offsetTable.Current.TableName;
-
-            do
+            foreach (var (label, tableName) in target.OffsetTable)
             {
-                var (label, tableName) = offsetTable.Current;
-
-                if (prevTable != tableName)
+                if (!tables.Contains(tableName))
                 {
-                    prevTable = tableName;
+                    tables.Add(tableName);
                     builder.AppendLine($"{tableName}:");
                 }
 
                 builder.AppendLine($"\t\tdc.w {label}-{tableName}");
+            }
 
-            } while (offsetTable.MoveNext());
+            var numTables = tables.Count;
+            var numSprites = target.OffsetTable.Count / numTables;
+            var definitions = SortDefinitions(source);
 
             foreach (var (definition, indices) in definitions)
             {
-                var labels = indices.Select(index => target.OffsetTable[index].Label)
-                    .ToImmutableSortedSet();
+                var labels = indices.Select(index =>
+                {
+                    if (interleaved)
+                        index = index / numTables + index % numTables * numSprites;
+
+                    return target.OffsetTable[index].Label;
+
+                }).ToImmutableSortedSet();
 
                 foreach (var label in labels)
                     builder.AppendLine($"{label}:");
