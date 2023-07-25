@@ -57,20 +57,12 @@
                 builder.AppendLine($"\t\tdc.w {label}-{tableName}");
             }
 
-            var numTables = tables.Count;
-            var numSprites = target.OffsetTable.Count / numTables;
-            var definitions = SortDefinitions(source);
+            var definitions = SortDefinitions(source, interleaved, tables.Count);
 
             foreach (var (definition, indices) in definitions)
             {
-                var labels = indices.Select(index =>
-                {
-                    if (interleaved)
-                        index = index / numTables + index % numTables * numSprites;
-
-                    return target.OffsetTable[index].Label;
-
-                }).ToImmutableSortedSet();
+                var labels = indices.Select(index => target.OffsetTable[index].Label)
+                    .ToImmutableSortedSet();
 
                 foreach (var label in labels)
                     builder.AppendLine($"{label}:");
@@ -276,13 +268,18 @@
             yield break;
         }
 
-        static IList<(IList<short>, IList<int>)> SortDefinitions(ParseResult result)
+        static IList<(IList<short>, IList<int>)>
+        SortDefinitions(ParseResult result, bool interleaved, int numTables)
         {
+            var numSprites = result.OffsetTable.Count / numTables;
             var labels = result.OffsetTable.Select(entry => entry.Label).ToList();
 
             return result.Definitions
                 .Select(definition => (definition.Key, definition.Value
-                    .Select(label => labels.IndexOf(label))
+                    .Select(label => {
+                        var index = labels.IndexOf(label);
+                        return interleaved ? index / numTables + index % numTables * numSprites : index;
+                    })
                     .OrderBy(index => index)
                     .ToList() as IList<int>
                 ))
