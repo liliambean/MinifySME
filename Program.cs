@@ -7,7 +7,7 @@
     {
         static void Main()
         {
-            var spriteFolderPath = @"C:\Users\Fred\Documents\Git\s3unlocked\General\Sprites";
+            var spriteFolderPath = @"D:\s3unlocked\General\Sprites";
             var players = new[]
             {
                 ("Sonic", true),
@@ -170,7 +170,7 @@
                     if (!definitions.TryGetValue(definition, out var existingLabels))
                     {
                         definitions.Add(definition, labels);
-                        labels = new HashSet<string>();
+                        labels = [];
                     }
                     else
                     {
@@ -268,7 +268,7 @@
             yield break;
         }
 
-        static IList<(IList<short>, IList<int>)>
+        static List<(IList<short>, IList<int>)>
         SortDefinitions(ParseResult result, bool interleaved, int numTables)
         {
             var numSprites = result.OffsetTable.Count / numTables;
