@@ -82,7 +82,7 @@
                 else
                 {
                     foreach (var value in definition.Skip(1))
-                        builder.AppendLine($"\t\tdc.w {SerializeOperandValue(value)}");
+                        builder.AppendLine($"\t\tdc.w ${value.ToString("X4")}");
                 }
             }
 
