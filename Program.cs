@@ -10,15 +10,16 @@
             var spriteFolderPath = @"D:\s3unlocked\General\Sprites";
             var players = new[]
             {
-                ("Sonic", true),
-                ("Tails", false),
-                ("Knuckles", false),
+                //("Sonic", "Sonic", true),
+                //("Tails", "Tails", false),
+                //("Knuckles", "Knuckles", false),
+                ("Sonic", "Players", false),
             };
 
-            foreach (var (player, interleaved) in players)
+            foreach (var (subfolder, player, interleaved) in players)
             {
-                var sourceMapPath = $"{spriteFolderPath}\\{player}\\map.asm";
-                var targetMapPath = $"{spriteFolderPath}\\{player}\\Map - {player}.asm";
+                var sourceMapPath = $"{spriteFolderPath}\\{subfolder}\\map.asm";
+                var targetMapPath = $"{spriteFolderPath}\\{subfolder}\\Map - {player}.asm";
 
                 if (File.Exists(sourceMapPath))
                 {
@@ -28,8 +29,8 @@
                     File.WriteAllText(targetMapPath, text);
                 }
 
-                var sourcePLCPath = $"{spriteFolderPath}\\{player}\\plc.asm";
-                var targetPLCPath = $"{spriteFolderPath}\\{player}\\DPLC - {player}.asm";
+                var sourcePLCPath = $"{spriteFolderPath}\\{subfolder}\\plc.asm";
+                var targetPLCPath = $"{spriteFolderPath}\\{subfolder}\\DPLC - {player}.asm";
 
                 if (File.Exists(sourcePLCPath))
                 {
